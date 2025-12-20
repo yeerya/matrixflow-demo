@@ -3,27 +3,30 @@ import requests
 from bs4 import BeautifulSoup
 from openai import OpenAI
 import json
-import time
 
 # --- 页面配置 ---
 st.set_page_config(page_title="MatrixFlow 爆款脚本生成器", page_icon="🚀", layout="wide")
 
-# --- 核心功能函数 ---
+# --- 初始化 Session State (关键修复：防止数据丢失) ---
+if 'product_name' not in st.session_state:
+    st.session_state.product_name = ""
+if 'product_data' not in st.session_state:
+    st.session_state.product_data = ""
 
+# --- 核心功能函数 ---
 def get_html_content(url):
-    """简单的网页抓取 (针对普通网页)"""
+    """简单的网页抓取"""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
     }
     try:
         response = requests.get(url, headers=headers, timeout=10)
-        response.encoding = 'utf-8' # 防止乱码
+        response.encoding = 'utf-8'
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'lxml')
-            # 尝试获取标题 (通用逻辑)
-            title = soup.title.string if soup.title else "未找到标题"
-            # 尝试获取一些正文文本
-            text = soup.get_text()[:2000] # 只取前2000字避免Token爆炸
+            title = soup.title.string.strip() if soup.title else "未找到标题"
+            # 简单清洗文本，去除多余空格
+            text = soup.get_text(separator="\n", strip=True)[:3000] 
             return {"title": title, "content": text, "success": True}
         else:
             return {"success": False, "error": f"状态码: {response.status_code}"}
@@ -78,7 +81,7 @@ def generate_script_with_ai(product_name, features, api_key, base_url, model_nam
                 {"role": "system", "content": "你是一个专业的短视频编导，擅长通过JSON格式输出脚本。"},
                 {"role": "user", "content": prompt}
             ],
-            response_format={"type": "json_object"} # 强制 JSON 输出
+            response_format={"type": "json_object"}
         )
         return json.loads(response.choices[0].message.content)
     except Exception as e:
@@ -87,12 +90,9 @@ def generate_script_with_ai(product_name, features, api_key, base_url, model_nam
 # --- 侧边栏：配置区 ---
 with st.sidebar:
     st.title("⚙️ 设置")
-    
-    # API 配置
     st.markdown("### 1. AI 模型配置")
     api_key = st.text_input("API Key", type="password", placeholder="sk-...")
     
-    # 预设一些常用的 Base URL
     base_url_option = st.selectbox(
         "API 厂商 (Base URL)",
         ["OpenAI 官方 (api.openai.com)", "DeepSeek (api.deepseek.com)", "自定义"]
@@ -109,8 +109,6 @@ with st.sidebar:
         default_model = "gpt-3.5-turbo"
 
     model_name = st.text_input("模型名称", default_model)
-    
-    st.info("💡 提示：如果没有 Key，可以去 DeepSeek 申请一个，非常便宜好用。")
 
 # --- 主界面 ---
 st.title("🎬 MatrixFlow 脚本生成器 (正式版)")
@@ -119,61 +117,69 @@ st.title("🎬 MatrixFlow 脚本生成器 (正式版)")
 st.markdown("### 第一步：输入商品")
 input_method = st.radio("选择输入方式", ["🔗 粘贴链接 (尝试抓取)", "✍️ 手动输入 (最稳)"])
 
-product_data = ""
-product_name_input = ""
-
 if input_method == "🔗 粘贴链接 (尝试抓取)":
     url = st.text_input("商品链接 (京东/淘宝/拼多多)")
-    if url:
-        if st.button("尝试抓取"):
+    if st.button("尝试抓取"):
+        if not url:
+            st.warning("请先输入链接！")
+        else:
             with st.spinner("🕷️ 正在尝试访问..."):
                 res = get_html_content(url)
                 if res['success']:
-                    st.success("抓取成功！请在下方确认信息。")
-                    product_name_input = res['title']
-                    product_data = res['content']
+                    # 关键修改：把数据存入 session_state
+                    st.session_state.product_name = res['title']
+                    st.session_state.product_data = res['content']
+                    st.success("抓取成功！数据已保存。")
                 else:
-                    st.error(f"抓取失败 ({res['error']})。电商网站反爬严格，请切换到'手动输入'模式。")
+                    st.error(f"抓取失败 ({res['error']})。请切换到'手动输入'模式。")
+    
+    # 显示当前已抓取的数据
+    if st.session_state.product_name:
+        st.info(f"✅ 已就绪商品：{st.session_state.product_name}")
+        with st.expander("查看抓取到的详情内容"):
+            st.text(st.session_state.product_data[:500] + "...")
+
 else:
-    product_name_input = st.text_input("商品名称", placeholder="例如：京东京造湿厕纸")
-    product_data = st.text_area("商品卖点/详情描述", placeholder="复制粘贴商品详情页的文字，越详细越好...", height=150)
+    # 手动输入模式也同步到 session_state
+    st.session_state.product_name = st.text_input("商品名称", value=st.session_state.product_name)
+    st.session_state.product_data = st.text_area("商品卖点/详情描述", value=st.session_state.product_data, height=150)
 
 # 2. 生成脚本
 st.markdown("### 第二步：生成脚本")
 
 if st.button("🚀 开始生成", type="primary"):
+    # 检查数据是否存在
     if not api_key:
         st.warning("⚠️ 请先在左侧侧边栏输入 API Key！")
-    elif not product_data:
-        st.warning("⚠️ 请提供商品信息！")
+    elif not st.session_state.product_data:
+        st.warning("⚠️ 请提供商品信息！(请先点击'尝试抓取'或手动输入)")
     else:
         with st.spinner(f"🧠 AI ({model_name}) 正在疯狂构思中..."):
-            # 调用 AI
-            result = generate_script_with_ai(product_name_input, product_data, api_key, base_url, model_name)
+            result = generate_script_with_ai(
+                st.session_state.product_name, 
+                st.session_state.product_data, 
+                api_key, 
+                base_url, 
+                model_name
+            )
             
             if "error" in result:
                 st.error(f"AI 调用失败: {result['error']}")
             else:
                 st.success("🎉 生成成功！")
                 
-                # 展示 AI 分析
                 with st.expander("🧐 查看 AI 的营销分析", expanded=True):
                     st.write(result.get("analysis", "暂无分析"))
                 
                 st.markdown("---")
                 
-                # 展示脚本
                 scripts = result.get("scripts", [])
-                if not scripts:
-                    st.error("AI 返回格式异常，请重试。")
-                else:
+                if scripts:
                     tabs = st.tabs([s['style'] for s in scripts])
-                    
                     for i, tab in enumerate(tabs):
                         with tab:
                             script = scripts[i]
                             st.subheader(script['hook'])
-                            
                             for scene in script['scenes']:
                                 col1, col2 = st.columns([1, 3])
                                 with col1:
